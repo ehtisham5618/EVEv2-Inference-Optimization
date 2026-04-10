@@ -1,0 +1,48 @@
+=============================================================================
+                          PERFORMANCE ANALYSIS
+=============================================================================
+Project: Profiling-Guided Inference Optimization for EVEv2 Vision-Language Model
+Hardware Environment: 2x NVIDIA Tesla T4 (15 GB each), CPU workers=2
+Precision: torch.float16 (FP16)
+Optimization Focus: Throughput speedup and CPU-GPU overlap
+=============================================================================
+
+1. PROFILING & BOTTLENECK IDENTIFICATION
+Before applying optimizations, an empirical and trace-based profiling step was executed using PyTorch Profiler on the baseline sequential inference pipeline (batch_size=1, no parallel data loading). 
+
+Top GPU Operations Identified via PyTorch Profiler:
+-------------------------------------------------------------------------
+Operation                             CUDA Time    % of Total CUDA Time
+-------------------------------------------------------------------------
+aten::copy_ (Memcpy HtoD)             ~29.5s       72.0%
+aten::mm / matmul (Compute)            ~6.6s       16.1%
+Other elementwise/attention ops        ~4.9s       11.9%
+
+Key Finding:
+The baseline inference was severely bound by memory bandwidth rather than compute. 72.0% of the CUDA execution time was wasted moving pageable memory from CPU to GPU (HtoD transfers). The actual compute-bound matrix multiplications (gemm/mm) only accounted for 16.1% of GPU time. This revealed that single-sample inference was highly inefficient.
+
+2. APPLIED OPTIMIZATIONS
+Based on the profiling results, three system-level optimizations were implemented to address the memory bandwidth bottleneck:
+
+A. Half-Precision Casting (FP16):
+   Image tensors and model weights were explicitly cast to torch.float16, cutting the required CPU-to-GPU data transfer bandwidth in half compared to FP32.
+
+B. Multi-Threaded DataLoader (CPU-GPU Overlap):
+   A custom torch.utils.data.DataLoader was implemented with `num_workers=2`. This allowed CPU threads to load, resize, and tokenize the next batch of images while the GPU was actively executing the forward pass for the current batch, effectively masking I/O latency.
+
+C. Batched Inference:
+   The inference batch size was increased from 1 to 2. By processing two image-question pairs in a single forward pass, the pipeline amortized the heavy cost of kernel launches and memory transfers, allowing the Tensor Cores to process a larger matrix dimension simultaneously.
+
+3. INFERENCE SPEED & THROUGHPUT RESULTS
+The optimizations yielded a significant and measurable improvement over the baseline pipeline across the full 9,000-question POPE benchmark.
+
+| Metric                        | Baseline Pipeline | Optimized Pipeline | Improvement      |
+|-------------------------------|-------------------|--------------------|------------------|
+| Batch Size                    | 1                 | 2                  | 2x larger        |
+| Time Per Iteration (Avg)      | 8.70 seconds      | 14.67 seconds      | N/A              |
+| Effective Time Per Sample     | 8.70 s / sample   | 7.33 s / sample    | 1.37 s faster    |
+| Total Inference Time (9000 Q) | 21.7 hours        | 18.3 hours         | -3.4 hours       |
+| Throughput (Questions/sec)    | 0.115 q/s         | 0.136 q/s          | +18.5%           |
+
+4. CONCLUSION
+The profiling-guided optimization was successful. By identifying the memory-transfer bottleneck and implementing batching with parallel CPU data loading, the system achieved a 1.185x (18.5%) speedup in throughput. This exceeded the project's minimum success threshold and successfully reduced the total benchmark execution time by nearly three and a half hours, demonstrating the critical importance of hardware-aware data pipelining in large Vision-Language Models.
